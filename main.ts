@@ -13,7 +13,8 @@ type PriceCase = {
 };
 
 /**
- * A forecast file contains exactly one case prediction and no extra metadata.
+ * A case prediction is a `case` identifier and its finite BTC `price`. Written
+ * files wrap this object as `{ "forecasts": [prediction] }` with no extra data.
  */
 type Forecast = {
   case: string;
@@ -29,8 +30,9 @@ function configuredDirectory(variable: string, fallback: string): string {
 }
 
 /**
- * Persistence forecasting assumes the next horizon starts at the last observed
- * value, which is the final entry in the first market's price history.
+ * Persistence forecasting carries the latest known price forward unchanged.
+ * That input is the final entry in the first market's price history, rather
+ * than the 240-minute-horizon value that remains unobserved at forecast time.
  */
 function lastPrice(case_: PriceCase): number | undefined {
   return case_.markets?.[0]?.prices?.at(-1);
