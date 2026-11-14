@@ -1,42 +1,70 @@
-// btc-cent-forecast-01 entry: forecast BTC price 240 minutes ahead.
-// Baseline (persistence) scores 44521 cents mean abs error on practice.
-// Strategy: median-anchored forecast with realized-vol-aware shrinkage:
-// the best point forecast under MAE is the median. BTC drifts little in 4h,
-// so predict last close adjusted by slow trend (60-min vs 12-hour mean slope,
-// heavily damped). Damped drift beats pure persistence when trends persist
-// and never loses much when they don't.
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+/**
+ * The competition only needs the subset of the input schema used to locate the
+ * observed BTC price series. Fields are optional so malformed data produces a
+ * clear runtime error rather than a misleading `undefined` forecast.
+ */
+type PriceCase = {
+  markets?: Array<{
+    prices?: number[];
+  }>;
+};
 
-const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+/**
+ * A forecast file contains exactly one case prediction and no extra metadata.
+ */
+type Forecast = {
+  case: string;
+  price: number;
+};
 
-function median(a) {
-  const s = [...a].sort((x, y) => x - y);
-  const n = s.length;
-  return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+const INPUT_EXTENSION = ".in";
+const OUTPUT_EXTENSION = ".out";
+
+function configuredDirectory(variable: string, fallback: string): string {
+  const value = process.env[variable]?.trim();
+  return value ? value : fallback;
 }
 
-function forecast(prices) {
-  const x = prices[prices.length - 1];
-  // Damped trend: 20% of slope was worse than persistence on backtest.
-  // Use tiny 2% damping: persistence dominated (4 of 6 cases), trend only helps
-  // in sustained dumps. 5% keeps persistence dominant.
-  const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
-  const short = mean(prices.slice(-60));
-  const long = mean(prices.slice(-720));
-  const slope = (short - long) / 11; // per-hour drift
-  const guess = x + 0.0 * slope * 4;
-  return guess;
+/**
+ * Persistence forecasting assumes the next horizon starts at the last observed
+ * value, which is the final entry in the first market's price history.
+ */
+function lastPrice(case_: PriceCase): number | undefined {
+  return case_.markets?.[0]?.prices?.at(-1);
 }
 
-mkdirSync(OUTPUT_DIR, { recursive: true });
-const inputs = readdirSync(INPUT_DIR).filter((f) => f.endsWith('.in')).sort();
-for (const file of inputs) {
-  const id = file.slice(0, -'.in'.length);
-  const c = JSON.parse(readFileSync(join(INPUT_DIR, file), 'utf8'));
-  const m = c.markets[0];
-  const price = forecast(m.prices);
-  writeFileSync(join(OUTPUT_DIR, `${id}.out`), `${JSON.stringify({ forecasts: [{ case: id, price }] })}\n`);
+async function forecastInput(inputPath: string): Promise<Forecast> {
+  const caseId = basename(inputPath, INPUT_EXTENSION);
+  const case_: PriceCase = JSON.parse(await readFile(inputPath, "utf8"));
+  const price = lastPrice(case_);
+
+  if (!Number.isFinite(price)) {
+    throw new Error(`${inputPath}: markets[0].prices has no final finite number`);
+  }
+
+  return { case: caseId, price };
+}
+
+const inputDir = configuredDirectory("MAKEFUN_INPUT_DIR", "/input");
+const outputDir = configuredDirectory("MAKEFUN_OUTPUT_DIR", "/output");
+
+await mkdir(outputDir, { recursive: true });
+
+const inputFiles = (await readdir(inputDir))
+  .filter((name) => name.endsWith(INPUT_EXTENSION))
+  .sort();
+
+// Process cases independently so one output can be emitted as soon as it is ready.
+for (const inputName of inputFiles) {
+  const inputPath = join(inputDir, inputName);
+  const forecast = await forecastInput(inputPath);
+  const outputPath = join(
+    outputDir,
+    `${forecast.case}${OUTPUT_EXTENSION}`,
+  );
+
+  await writeFile(outputPath, JSON.stringify({ forecasts: [forecast] }));
 }
